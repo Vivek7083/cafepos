@@ -18,6 +18,8 @@ _INDEXES = [
         "partialFilterExpression": {"username": {"$type": "string"}},
     }),
     ("users", [("cafe_id", ASCENDING), ("role", ASCENDING)], {}),
+    # Platform-admin pending-cafe-list query.
+    ("cafes", [("status", ASCENDING)], {}),
     # Unique per (cafe, series, serial): each device series is its own consecutive
     # invoice line, so C-1 and B2-1 coexist while duplicates within a series can't.
     ("bills", [("cafe_id", ASCENDING), ("series", ASCENDING), ("bill_number", ASCENDING)], {"unique": True}),

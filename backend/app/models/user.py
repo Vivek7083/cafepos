@@ -22,13 +22,12 @@ class User(DBModel):
     id: str = Field(default_factory=new_id)
     email: str
     name: str
-    username: Optional[str] = None  # staff log in with this; managers use email
+    username: Optional[str] = None  # staff log in with this; managers use email — retired in Slice 5
     phone: Optional[str] = None
     role: str = Role.owner.value  # platform_admin, owner, manager, waiter, kitchen
     cafe_id: Optional[str] = None  # None only for platform_admin
-    pin: Optional[str] = None  # bcrypt-hashed 4-digit PIN for staff
+    is_email_verified: bool = False
     is_active: bool = True
-    device_token: Optional[str] = None
     last_active: Optional[datetime] = None
     created_by: Optional[str] = None
     created_at: datetime = Field(default_factory=utcnow)

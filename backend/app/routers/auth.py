@@ -65,10 +65,13 @@ async def _create_owner_and_cafe(*, email: str, name: str, cafe_name: str, passw
                                  phone: str | None = None) -> User:
     """Create the cafe + owner user pair used by both signup paths."""
     # Legacy/automation path — no GST collected, so the cafe is a test account.
-    cafe = Cafe(name=cafe_name, is_test_account=True)
+    # Test accounts auto-approve: pytest/local dev never gets stuck behind the
+    # platform-admin approval gate.
+    cafe = Cafe(name=cafe_name, is_test_account=True, status="approved")
     await db.cafes.insert_one(to_mongo(cafe))
 
-    user = User(email=email, name=name, phone=phone, cafe_id=cafe.id, role=Role.owner.value)
+    # Owner signup sets a password up front — never in the "verify by OTP" state.
+    user = User(email=email, name=name, phone=phone, cafe_id=cafe.id, role=Role.owner.value, is_email_verified=True)
     user_doc = to_mongo(user)
     user_doc["password"] = get_password_hash(password)
     await db.users.insert_one(user_doc)
@@ -147,15 +150,18 @@ async def register_verify(payload: RegisterVerify):
         await db.pending_registrations.delete_one({"email": payload.email})
         raise HTTPException(status_code=400, detail="Email already registered")
 
+    is_test_account = pending.get("is_test_account", False)
     cafe = Cafe(
         name=pending["cafe_name"],
         gst_number=pending.get("gst_number"),
-        is_test_account=pending.get("is_test_account", False),
+        is_test_account=is_test_account,
+        # Test accounts auto-approve; a real signup waits for platform-admin approval.
+        status="approved" if is_test_account else "pending",
     )
     await db.cafes.insert_one(to_mongo(cafe))
     user = User(
         email=pending["email"], name=pending["name"], phone=pending.get("phone"),
-        cafe_id=cafe.id, role=Role.owner.value,
+        cafe_id=cafe.id, role=Role.owner.value, is_email_verified=True,
     )
     user_doc = to_mongo(user)
     user_doc["password"] = pending["password_hash"]  # already hashed at start
