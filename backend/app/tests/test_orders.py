@@ -25,11 +25,33 @@ async def test_order_lifecycle_transitions(api, owner):
     bad = await api.put(f"/api/orders/{oid}/status", json={"status": "ready"}, headers=owner["headers"])
     assert bad.status_code == 400
 
-    # Valid path: pending → preparing → ready → completed.
-    for target in ("preparing", "ready", "completed"):
+    # Valid path: pending → preparing → ready → served.
+    for target in ("preparing", "ready", "served"):
         ok = await api.put(f"/api/orders/{oid}/status", json={"status": target}, headers=owner["headers"])
         assert ok.status_code == 200, ok.text
         assert ok.json()["status"] == target
+
+
+async def test_completed_is_not_reachable_through_status_put(api, owner):
+    """completed only ever happens by creating a bill — this endpoint must
+    refuse it as a direct target, even from the one state next to it."""
+    order = (await api.post("/api/orders", json=_order_payload(), headers=owner["headers"])).json()
+    oid = order["id"]
+    for target in ("preparing", "ready", "served"):
+        await api.put(f"/api/orders/{oid}/status", json={"status": target}, headers=owner["headers"])
+
+    resp = await api.put(f"/api/orders/{oid}/status", json={"status": "completed"}, headers=owner["headers"])
+    assert resp.status_code == 400
+
+
+async def test_served_order_can_still_be_cancelled(api, owner):
+    order = (await api.post("/api/orders", json=_order_payload(), headers=owner["headers"])).json()
+    oid = order["id"]
+    for target in ("preparing", "ready", "served"):
+        await api.put(f"/api/orders/{oid}/status", json={"status": target}, headers=owner["headers"])
+
+    resp = await api.delete(f"/api/orders/{oid}", headers=owner["headers"])
+    assert resp.status_code == 200, resp.text
 
 
 async def test_waiter_order_is_self_attributed(api, owner):

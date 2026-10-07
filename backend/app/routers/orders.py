@@ -124,6 +124,11 @@ async def update_order_status(order_id: str, payload: OrderStatusUpdate, current
         raise HTTPException(status_code=403, detail="You do not have access to this order.")
 
     target = payload.status.value
+    if target == OrderStatus.completed.value:
+        raise HTTPException(
+            status_code=400,
+            detail="Orders are completed by creating a bill, not by setting status directly.",
+        )
     if not can_transition(order["status"], target):
         raise HTTPException(
             status_code=400,

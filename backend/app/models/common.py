@@ -39,11 +39,11 @@ class TableStatus(str, Enum):
 
 
 class OrderStatus(str, Enum):
-    # Retained set for Phase 1; the unified lifecycle is refined in Phase 2.
     active = "active"
     pending = "pending"
     preparing = "preparing"
     ready = "ready"
+    served = "served"  # handed to the table; awaiting payment
     completed = "completed"
     cancelled = "cancelled"
 
