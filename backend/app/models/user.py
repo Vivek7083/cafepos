@@ -127,6 +127,25 @@ class UserLogin(BaseModel):
     password: str
 
 
+class LoginStart(BaseModel):
+    """Step 1 of the unified login flow: branch into OTP-first-login or password."""
+    email: EmailStr
+
+
+class FirstLogin(BaseModel):
+    """Step 2 for a user who has never signed in: confirm the OTP and set a password."""
+    email: EmailStr
+    otp: str = Field(min_length=6, max_length=6)
+    password: str = Field(min_length=6)
+    confirm_password: str
+
+    @model_validator(mode="after")
+    def _passwords_match(self):
+        if self.password != self.confirm_password:
+            raise ValueError("Passwords do not match.")
+        return self
+
+
 class TokenRefresh(BaseModel):
     refresh_token: str
 

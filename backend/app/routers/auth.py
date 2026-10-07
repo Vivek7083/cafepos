@@ -24,6 +24,8 @@ from app.models.cafe import Cafe
 from app.models.common import Role, utcnow
 from app.models.user import (
     AuthResponse,
+    FirstLogin,
+    LoginStart,
     RegisterStart,
     RegisterVerify,
     ResetConfirm,
@@ -36,6 +38,8 @@ from app.models.user import (
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 settings = get_settings()
+
+_FIRST_LOGIN = "first_login"
 
 
 def _issue(user: User) -> AuthResponse:
@@ -178,6 +182,75 @@ async def login(payload: UserLogin):
         raise HTTPException(status_code=401, detail="Invalid credentials")
     if not user.get("is_active", True):
         raise HTTPException(status_code=403, detail="Account is deactivated.")
+    return _issue(User(**user))
+
+
+@router.post("/login-start")
+async def login_start(payload: LoginStart):
+    """Step 1 of the unified login flow: branch into OTP-first-login or password.
+
+    An unknown email gets the same {"next": "verify"} shape as a genuine
+    unverified account — it just dead-ends at /first-login with "invalid code"
+    instead of a real OTP, so this can't be used to enumerate registered emails.
+    """
+    user = await db.users.find_one({"email": payload.email})
+    if not user or not user.get("is_email_verified"):
+        resp = {"next": "verify"}
+        if user:
+            otp = generate_otp()
+            await db.action_otps.replace_one(
+                {"user_id": user["id"], "purpose": _FIRST_LOGIN},
+                {
+                    "user_id": user["id"],
+                    "cafe_id": user.get("cafe_id"),
+                    "purpose": _FIRST_LOGIN,
+                    "otp_hash": get_password_hash(otp),
+                    "attempts": 0,
+                    "expires_at": utcnow() + timedelta(minutes=settings.otp_expiry_minutes),
+                },
+                upsert=True,
+            )
+            subject, body = otp_email(user.get("name", "there"), otp)
+            await send_email(user["email"], subject, body)
+            if not settings.email_configured:  # DEV convenience.
+                resp["dev_otp"] = otp
+        return resp
+    return {"next": "password"}
+
+
+@router.post("/first-login", response_model=AuthResponse)
+async def first_login(payload: FirstLogin):
+    """Complete a first-time login: verify the OTP, set is_email_verified + the
+    caller's chosen password, and sign them in — one call instead of a separate
+    verify-then-set-password round trip."""
+    user = await db.users.find_one({"email": payload.email})
+    if not user:
+        raise HTTPException(status_code=400, detail="Invalid or expired code.")
+
+    challenge = await db.action_otps.find_one({"user_id": user["id"], "purpose": _FIRST_LOGIN})
+    if not challenge:
+        raise HTTPException(status_code=400, detail="Invalid or expired code.")
+    if is_expired(challenge["expires_at"]):
+        await db.action_otps.delete_one({"_id": challenge["_id"]})
+        raise HTTPException(status_code=400, detail="Code expired. Please start again.")
+    if challenge.get("attempts", 0) >= settings.otp_max_attempts:
+        await db.action_otps.delete_one({"_id": challenge["_id"]})
+        raise HTTPException(status_code=429, detail="Too many attempts. Please start again.")
+    if not verify_password(payload.otp, challenge["otp_hash"]):
+        await db.action_otps.update_one({"_id": challenge["_id"]}, {"$inc": {"attempts": 1}})
+        raise HTTPException(status_code=400, detail="Invalid verification code.")
+
+    if not user.get("is_active", True):
+        raise HTTPException(status_code=403, detail="Account is deactivated.")
+
+    password_hash = get_password_hash(payload.password)
+    await db.users.update_one(
+        {"id": user["id"]},
+        {"$set": {"is_email_verified": True, "password": password_hash}},
+    )
+    await db.action_otps.delete_one({"_id": challenge["_id"]})
+
+    user["is_email_verified"] = True
     return _issue(User(**user))
 
 
