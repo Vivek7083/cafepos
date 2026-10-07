@@ -14,7 +14,7 @@
 - `/profile` is open to every staff role (owner/manager/waiter/kitchen) for self-service account editing; the cafe object it returns is read-only there exactly as `GET /cafe` already is — only `PATCH /cafe` (owner-only) can change it.
 - A pending cafe's owner **can** log in; every cafe-scoped action beyond that is blocked downstream with an explicit "awaiting approval" reason.
 - Staff invites are one endpoint for every role (`POST /staff {name, email, role}`) — an owner can invite directly into `manager`; a manager can only invite `waiter`/`kitchen` (not another `manager`).
-- Concurrent-device cap (added 2026-10-07, folded into Slice 4): every non-owner role (`manager`, `waiter`, `kitchen`) can be signed in on at most 2 devices at a time. Owner is exempt (unlimited). A 3rd login attempt is rejected outright (no silent kick of the oldest session). No "view/manage my sessions" UI in this phase — just the cap plus a bare logout endpoint to free a slot.
+- ~~Concurrent-device cap (added 2026-10-07, folded into Slice 4)~~ — **descoped 2026-10-08**: every non-owner role would have been capped at 2 concurrent devices. Dropped for this phase in favor of per-user action logging (an audit trail of who did what, not a login limiter) as the accountability mechanism instead. Revisit later if a concrete need for the cap itself resurfaces.
 
 Each slice below is one commit-sized, sequential, independently testable change. Later slices assume earlier ones landed. DB/index/model changes live inside the slice that needs them, not split out separately.
 
@@ -84,7 +84,7 @@ Each slice below is one commit-sized, sequential, independently testable change.
   - User found, `is_email_verified=True` → respond `{"next": "password"}` (no OTP sent — this is the normal returning-user path).
 - New endpoint `POST /api/auth/first-login` `{email, otp, password, confirm_password}`:
   - Verifies the OTP against `action_otps` (purpose `"first_login"`), sets `is_email_verified=True` + stores the password hash, deletes the OTP record, returns `AuthResponse` (same shape as today's register/login) — one call completes the whole first-time flow instead of a separate verify-then-set-password round trip.
-- Existing `POST /api/auth/login` `{email, password}` keeps its request/response shape but now routes through the same session-cap check as `first-login` (see below) — it's the endpoint every returning manager/waiter/kitchen actually uses, so the cap is meaningless if only the new endpoints enforce it.
+- Existing `POST /api/auth/login` `{email, password}` keeps its request/response shape unchanged.
 - Existing `/auth/reset/*` (forgot password) unchanged — already works for any user once they have a password.
 - `/auth/register/*` (owner cafe creation) **unchanged** — this slice doesn't touch owner signup, only adds the generic "I already have a `users` row, first time logging in" path that owner signup doesn't need (owner sets their password at signup, so they're never in the `is_email_verified=False` state login-wise... except: should owner signup also require email verification before first login, for consistency? Today `register/verify` already does its own OTP step before creating the user — so the owner row is created with `is_email_verified=True` directly. No conflict.)
 
@@ -92,21 +92,14 @@ Each slice below is one commit-sized, sequential, independently testable change.
 
 **Tests touched:** new `test_login_flow.py` covering login-start branching + first-login success/expired-OTP/wrong-OTP/already-verified cases.
 
-### Concurrent-device cap (non-owner roles, max 2)
+### Concurrent-device cap — descoped (2026-10-08)
 
-**What changes**
-- New collection `sessions`: `{id, user_id, cafe_id, role, device_id, created_at, last_seen_at, expires_at}`. One row per `(user_id, device_id)` pair — a device re-authenticating updates its own row rather than consuming a new slot.
-- `UserLogin`, `RegisterVerify`-equivalent `first-login` payload, and (implicitly) `login-start` all gain an optional `device_id: str` — a random id the client generates once and persists locally (e.g. `localStorage`), sent on every login call. **This is a client responsibility the frontend plan must pick up**; a client that never sends `device_id` is treated as a single ever-changing device and will exhaust its 2-slot cap on the 3rd login. Flagging explicitly since this plan is backend-only.
-- Shared helper `app/core/sessions.py::claim_session(user_id, cafe_id, role, device_id) -> None` (raises 403 on the 4th+ distinct device), called from the one place every login path already converges: `_issue()` in `auth.py`. Owner role short-circuits (no check, no row).
-  - Known device (`(user_id, device_id)` row exists, not expired): refresh `last_seen_at`/`expires_at`, allow.
-  - Unknown device, < 2 active rows for `user_id`: insert a new row, allow.
-  - Unknown device, >= 2 active rows: reject — `403 "You're already signed in on 2 devices. Log out of one first."`
-- `app/db/indexes.py`: unique index on `(user_id, device_id)`; TTL index on `expires_at` matching the refresh-token lifetime, so a device that's lost/never logged out frees its slot automatically once its refresh token would have expired anyway rather than permanently occupying it.
-- New endpoint `POST /api/auth/logout {device_id}` (authenticated): deletes that one session row immediately. This is the minimum escape hatch — not a "view all my sessions" UI (out of scope this phase) — so a staff member switching devices isn't stuck waiting out the TTL.
-
-**Confidence:** 90%. The cap/claim logic and the logout endpoint are straightforward, but this is new design (no prior device-session tracking exists in the codebase today) rather than a reuse of existing infrastructure, and it has a real frontend dependency (`device_id` generation/persistence) that this backend-only plan can't fully close out — flagging rather than claiming 98%+ like the rest of this slice.
-
-**Tests touched:** new `test_device_cap.py` — same device re-logging-in never consumes a new slot; a 3rd distinct device is rejected with 403; owner has no cap; `logout` frees a slot immediately; an expired session row (TTL) frees a slot without an explicit logout.
+Was folded into this slice at 90% confidence (new design, real frontend
+dependency on client-generated `device_id`). Dropped for this phase: per-user
+action logging (an audit trail of who did what) was chosen instead as the
+accountability mechanism, which needs no login-time device tracking at all.
+Nothing in `sessions`/`claim_session`/`POST /auth/logout` was built. Revisit
+only if a concrete need for the cap itself resurfaces later.
 
 ---
 
