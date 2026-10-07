@@ -7,7 +7,7 @@ from fastapi.encoders import jsonable_encoder
 from app.core.deps import MANAGEMENT, get_current_user
 from app.db.mongo import db
 from app.db.serialization import to_mongo
-from app.models.common import TableStatus
+from app.models.common import Role, TableStatus
 from app.models.table import (
     Floor,
     FloorCreate,
@@ -108,14 +108,15 @@ async def update_table(table_id: str, payload: TableUpdate, current_user: dict =
         raise HTTPException(status_code=403, detail="You do not have access to this table.")
     updates = payload.model_dump(exclude_unset=True)
 
-    # A floor device may seat and free tables, nothing structural: renaming a
-    # table or moving it between floors is a layout decision, not a service one.
-    if current_user.get("device_id"):
+    # A waiter/kitchen session may seat and free tables, nothing structural:
+    # renaming a table or moving it between floors is a layout decision, not a
+    # service one — the same limited authority a paired tablet used to have.
+    if current_user["role"] in (Role.waiter.value, Role.kitchen.value):
         structural = set(updates) - {"status", "current_order_id"}
         if structural:
             raise HTTPException(
                 status_code=403,
-                detail=f"A waiter device cannot change {', '.join(sorted(structural))}.",
+                detail=f"A waiter cannot change {', '.join(sorted(structural))}.",
             )
 
     # Rename or floor move changes the floorname+name code — recompute and guard uniqueness.

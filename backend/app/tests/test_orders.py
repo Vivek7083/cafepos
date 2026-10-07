@@ -1,3 +1,6 @@
+from .test_staff import _invite, _login_as
+
+
 def _order_payload(table_id=None):
     return {
         "table_id": table_id,
@@ -27,6 +30,32 @@ async def test_order_lifecycle_transitions(api, owner):
         ok = await api.put(f"/api/orders/{oid}/status", json={"status": target}, headers=owner["headers"])
         assert ok.status_code == 200, ok.text
         assert ok.json()["status"] == target
+
+
+async def test_waiter_order_is_self_attributed(api, owner):
+    """A waiter's own session is the only source of truth for their own orders
+    (Slice 6) — no client-supplied waiter_id is trusted or needed."""
+    invited = await _invite(api, owner["headers"], role="waiter", name="Ravi")
+    waiter = await _login_as(api, invited)
+
+    order = await api.post("/api/orders", json=_order_payload(), headers=waiter["headers"])
+    assert order.status_code == 200, order.text
+    assert order.json()["waiter_id"] == invited["id"]
+    assert order.json()["waiter_name"] == "Ravi"
+
+
+async def test_manager_can_place_a_counter_order_for_a_waiter(api, owner):
+    """Owner/manager sessions still use the explicit waiter_id/waiter_name —
+    placing a counter order on someone else's behalf."""
+    invited = await _invite(api, owner["headers"], role="waiter", name="Ravi")
+    payload = _order_payload()
+    payload["waiter_id"] = invited["id"]
+    payload["waiter_name"] = invited["name"]
+
+    order = await api.post("/api/orders", json=payload, headers=owner["headers"])
+    assert order.status_code == 200, order.text
+    assert order.json()["waiter_id"] == invited["id"]
+    assert order.json()["waiter_name"] == "Ravi"
 
 
 async def test_dine_in_order_occupies_and_frees_table(api, owner):

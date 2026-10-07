@@ -29,10 +29,6 @@ _INDEXES = [
     ("day_sessions", [("cafe_id", ASCENDING), ("session_date", ASCENDING)], {}),
     ("inventory", [("cafe_id", ASCENDING)], {}),
     ("device_sessions", [("device_id", ASCENDING)], {}),
-    # Waiter device-authorization records.
-    ("device_activations", [("user_id", ASCENDING), ("device_id", ASCENDING)], {"unique": True}),
-    ("device_activations", [("code", ASCENDING)], {}),
-    ("device_activations", [("expires_at", ASCENDING)], {"expireAfterSeconds": 0}),
     # Signup/reset ephemeral records. TTL indexes (expireAfterSeconds=0) let
     # Mongo auto-purge expired docs — requires expires_at stored as a BSON date.
     ("pending_registrations", [("email", ASCENDING)], {"unique": True}),
@@ -47,6 +43,7 @@ _INDEXES = [
 
 async def ensure_indexes(db) -> None:
     await _migrate_bill_series(db)
+    await _drop_device_activations(db)
     for collection, keys, opts in _INDEXES:
         try:
             await db[collection].create_index(keys, **opts)
@@ -69,3 +66,14 @@ async def _migrate_bill_series(db) -> None:
         await db.bills.drop_index("cafe_id_1_bill_number_1")
     except Exception:  # index may not exist (fresh db) — fine
         pass
+
+
+async def _drop_device_activations(db) -> None:
+    """Device pairing is gone (Slice 6) — drop the collection it lived in.
+
+    No real data depends on it; this is a no-op once it's already gone.
+    """
+    try:
+        await db.device_activations.drop()
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("Could not drop device_activations: %s", exc)

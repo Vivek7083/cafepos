@@ -8,20 +8,15 @@ async def _invite(api, headers, role="waiter", name="Rahul Kumar"):
     return resp.json()
 
 
-async def _pair_device(api, owner, device_id="dev-1", waiter_id=None, device_name=None):
-    """Request a code, activate it (manager), poll to a device token. Returns the
-    poll response (status + tokens + device)."""
-    code = (await api.post("/api/waiters/devices/request", json={"device_id": device_id})).json()["code"]
-    body = {"code": code}
-    if waiter_id:
-        body["waiter_id"] = waiter_id
-    if device_name:
-        body["device_name"] = device_name
-    act = await api.post("/api/waiters/devices/activate", json=body, headers=owner["headers"])
-    assert act.status_code == 200, act.text
-    poll = await api.post("/api/waiters/devices/poll", json={"device_id": device_id, "code": code})
-    assert poll.status_code == 200, poll.text
-    return poll.json()
+async def _login_as(api, invited: dict) -> dict:
+    """Complete an invite's first-login so the invited staff member has a real
+    signed-in session (headers), the way they would after the OTP email."""
+    done = await api.post("/api/auth/first-login", json={
+        "email": invited["email"], "otp": invited["dev_otp"],
+        "password": "password123", "confirm_password": "password123",
+    })
+    assert done.status_code == 200, done.text
+    return {"headers": {"Authorization": f"Bearer {done.json()['token']}"}, **invited}
 
 
 # ---- Staff invite ----
@@ -108,125 +103,6 @@ async def test_manager_cannot_edit_another_manager(api, owner):
         f"/api/staff/{manager_b_invite['id']}", json={"name": "Hijacked"}, headers=manager_a_headers
     )
     assert resp.status_code == 403
-
-
-# ---- Device pairing (unchanged, still under /waiters/devices) ----
-
-async def test_pairing_pending_then_active_token(api, owner):
-    device_id = "dev-9"
-    code = (await api.post("/api/waiters/devices/request", json={"device_id": device_id})).json()["code"]
-
-    # Same request returns the same code while pending.
-    again = (await api.post("/api/waiters/devices/request", json={"device_id": device_id})).json()["code"]
-    assert again == code
-
-    # Poll before activation -> pending, no token.
-    pending = await api.post("/api/waiters/devices/poll", json={"device_id": device_id, "code": code})
-    assert pending.json()["status"] == "pending"
-
-    act = await api.post("/api/waiters/devices/activate", json={"code": code}, headers=owner["headers"])
-    assert act.status_code == 200, act.text
-
-    done = await api.post("/api/waiters/devices/poll", json={"device_id": device_id, "code": code})
-    assert done.json()["status"] == "active"
-    assert done.json()["token"] and done.json()["refresh_token"]
-    assert done.json()["device"]["assigned_user"] is None  # ordering-only until assigned
-
-
-async def test_activate_bad_code_rejected(api, owner):
-    resp = await api.post(
-        "/api/waiters/devices/activate", json={"code": "ZZZZ-ZZZZ-ZZZZ"}, headers=owner["headers"]
-    )
-    assert resp.status_code == 400
-
-
-async def test_device_me_and_live_reassignment(api, owner):
-    a = await _invite(api, owner["headers"], name="Waiter A")
-    b = await _invite(api, owner["headers"], name="Waiter B")
-    poll = await _pair_device(api, owner, device_id="dev-me", waiter_id=a["id"], device_name="Counter 1")
-    headers = {"Authorization": f"Bearer {poll['token']}"}
-
-    me = await api.get("/api/devices/me", headers=headers)
-    assert me.status_code == 200, me.text
-    assert me.json()["device_name"] == "Counter 1"
-    assert me.json()["assigned_user"]["id"] == a["id"]
-
-    # Manager reassigns to B — the device token sees it live (no re-pair).
-    device = (await api.get("/api/waiters/devices", headers=owner["headers"])).json()[0]
-    patch = await api.patch(
-        f"/api/waiters/devices/{device['id']}", json={"user_id": b["id"]}, headers=owner["headers"]
-    )
-    assert patch.status_code == 200, patch.text
-    me2 = await api.get("/api/devices/me", headers=headers)
-    assert me2.json()["assigned_user"]["id"] == b["id"]
-
-    # Clear the assignment -> ordering-only.
-    await api.patch(f"/api/waiters/devices/{device['id']}", json={"user_id": None}, headers=owner["headers"])
-    me3 = await api.get("/api/devices/me", headers=headers)
-    assert me3.json()["assigned_user"] is None
-
-
-async def test_order_attributed_from_device_assignment(api, owner):
-    staff = await _invite(api, owner["headers"], name="Ravi")
-    poll = await _pair_device(api, owner, device_id="dev-order", waiter_id=staff["id"])
-    headers = {"Authorization": f"Bearer {poll['token']}"}
-    items = [{"menu_item_id": "m1", "menu_item_name": "Latte", "quantity": 1, "price": 100}]
-
-    # Client sends no waiter fields; server stamps from the device assignment.
-    order = await api.post("/api/orders", json={"table_id": "t-1", "items": items, "status": "active"}, headers=headers)
-    assert order.status_code == 200, order.text
-    assert order.json()["waiter_id"] == staff["id"]
-    assert order.json()["waiter_name"] == "Ravi"
-
-    # Clear assignment -> subsequent orders are unattributed but still work.
-    device = (await api.get("/api/waiters/devices", headers=owner["headers"])).json()[0]
-    await api.patch(f"/api/waiters/devices/{device['id']}", json={"user_id": None}, headers=owner["headers"])
-    order2 = await api.post("/api/orders", json={"table_id": "t-2", "items": items, "status": "active"}, headers=headers)
-    assert order2.status_code == 200, order2.text
-    assert order2.json()["waiter_id"] is None
-
-
-async def test_logout_marks_device_logged_out(api, owner):
-    poll = await _pair_device(api, owner, device_id="dev-lo")
-    headers = {"Authorization": f"Bearer {poll['token']}"}
-
-    devices = await api.get("/api/waiters/devices", headers=owner["headers"])
-    assert devices.json()[0]["signed_in"] is True
-
-    lo = await api.post("/api/waiters/devices/logout", json={"device_id": "dev-lo"}, headers=headers)
-    assert lo.status_code == 200, lo.text
-
-    devices = await api.get("/api/waiters/devices", headers=owner["headers"])
-    row = devices.json()[0]
-    assert row["signed_in"] is False and row["status"] == "active"
-    assert row["last_logout"] is not None
-
-
-async def test_revoke_device(api, owner):
-    poll = await _pair_device(api, owner, device_id="dev-rev")
-    headers = {"Authorization": f"Bearer {poll['token']}"}
-    device = (await api.get("/api/waiters/devices", headers=owner["headers"])).json()[0]
-
-    d = await api.delete(f"/api/waiters/devices/{device['id']}", headers=owner["headers"])
-    assert d.status_code == 200
-    # Device token no longer resolves once revoked.
-    me = await api.get("/api/devices/me", headers=headers)
-    assert me.status_code == 401
-
-
-async def test_deactivate_unassigns_devices(api, owner):
-    staff = await _invite(api, owner["headers"])
-    await _pair_device(api, owner, device_id="dev-de", waiter_id=staff["id"])
-
-    d = await api.post(f"/api/staff/{staff['id']}/deactivate", headers=owner["headers"])
-    assert d.status_code == 200
-    device = (await api.get("/api/waiters/devices", headers=owner["headers"])).json()[0]
-    assert device["assigned_user"] is None  # device stays paired, just unassigned
-
-
-async def test_poll_unknown_code_404(api):
-    resp = await api.post("/api/waiters/devices/poll", json={"device_id": "x", "code": "ZZZZ-ZZZZ-ZZZZ"})
-    assert resp.status_code == 404
 
 
 async def test_staff_stats(api, owner):
