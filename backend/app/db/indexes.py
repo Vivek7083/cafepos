@@ -11,12 +11,6 @@ logger = logging.getLogger("cafepos")
 
 _INDEXES = [
     ("users", [("email", ASCENDING)], {"unique": True}),
-    # Staff log in by username. Partial (string-only) so the many manager rows
-    # that store username=null don't collide on a unique index.
-    ("users", [("username", ASCENDING)], {
-        "unique": True,
-        "partialFilterExpression": {"username": {"$type": "string"}},
-    }),
     ("users", [("cafe_id", ASCENDING), ("role", ASCENDING)], {}),
     # Platform-admin pending-cafe-list query.
     ("cafes", [("status", ASCENDING)], {}),

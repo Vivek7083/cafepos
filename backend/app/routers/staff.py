@@ -23,12 +23,13 @@ from app.models.user import (
     DeviceCodeRequest,
     DeviceLogout,
     DevicePoll,
+    StaffInvite,
     User,
-    WaiterCreate,
     WaiterUpdate,
 )
+from app.services.auth_otp import send_first_login_otp
 
-router = APIRouter(tags=["waiters"])
+router = APIRouter(tags=["staff"])
 settings = get_settings()
 
 # Everyone an owner/manager can see and administer on the roster.
@@ -52,97 +53,102 @@ async def _assigned_user(activation: dict) -> dict | None:
     uid = activation.get("user_id")
     if not uid:
         return None
-    u = await db.users.find_one({"id": uid}, {"_id": 0, "id": 1, "name": 1, "username": 1})
-    return u
+    return await db.users.find_one({"id": uid}, {"_id": 0, "id": 1, "name": 1})
 
 
-async def _unique_username(name: str, provided: str | None) -> str:
-    """Slugify the name (or a provided handle) and append a numeric suffix until
-    free: 'Rahul Kumar' -> 'rahulkumar', then 'rahulkumar1', ..."""
-    base = re.sub(r"[^a-z0-9]", "", (provided or name).lower()) or "staff"
-    candidate = base
-    suffix = 0
-    while await db.users.find_one({"username": candidate}):
-        suffix += 1
-        candidate = f"{base}{suffix}"
-    return candidate
+def _guard_manager_boundary(current_user: dict, target: dict) -> None:
+    """A manager can't create, edit, deactivate, reactivate, or delete another
+    manager — only the owner can. Owner is unrestricted."""
+    if current_user["role"] == Role.manager.value and target["role"] == Role.manager.value:
+        raise HTTPException(status_code=403, detail="Managers can't manage other managers.")
 
 
-# ---- Staff roster (names only — staff never log in; devices do) ----
-
-@router.post("/waiters", response_model=User)
-async def create_waiter(payload: WaiterCreate, current_user: dict = Depends(MANAGEMENT)):
-    """Add a staff member to the roster. Just a name (+ auto username) used to
-    attribute orders once assigned to a device — no login credentials."""
-    cafe_id = current_user["cafe_id"]
-    username = await _unique_username(payload.name, payload.username)
-    waiter = User(
-        email=f"{username}@staff.local",  # satisfies the unique-email index; unused for login
-        username=username,
-        name=payload.name,
-        role=Role.waiter.value,
-        cafe_id=cafe_id,
-        created_by=current_user.get("user_id"),
-    )
-    await db.users.insert_one(to_mongo(waiter))
-    return waiter
-
-
-@router.get("/waiters", response_model=List[User])
-async def get_waiters(current_user: dict = Depends(MANAGEMENT)):
-    """List staff for the manager's cafe (active and deactivated)."""
-    return await db.users.find(
-        {"cafe_id": current_user["cafe_id"], "role": {"$in": _ROSTER_ROLES}},
-        {"_id": 0, "password": 0, "pin": 0, "password_enc": 0},
-    ).to_list(1000)
-
-
-@router.patch("/waiters/{waiter_id}", response_model=User)
-async def update_waiter(waiter_id: str, payload: WaiterUpdate, current_user: dict = Depends(MANAGEMENT)):
-    """Edit a staff roster entry: name and/or username."""
+async def _find_staff_or_404(staff_id: str, cafe_id: str) -> dict:
     staff = await db.users.find_one(
-        {"id": waiter_id, "cafe_id": current_user["cafe_id"], "role": {"$in": _ROSTER_ROLES}}
+        {"id": staff_id, "cafe_id": cafe_id, "role": {"$in": _ROSTER_ROLES}}, {"_id": 0}
     )
     if not staff:
         raise HTTPException(status_code=404, detail="Staff member not found.")
+    return staff
+
+
+# ---- Staff invite (replaces name-only roster creation) ----
+
+@router.post("/staff")
+async def create_staff(payload: StaffInvite, current_user: dict = Depends(MANAGEMENT)):
+    """Invite a new staff member — one endpoint for every role. Creates the
+    user row immediately (unverified, no password) and emails a first-login
+    OTP right away; the invite itself is that user's first-login trigger."""
+    if current_user["role"] == Role.manager.value and payload.role == Role.manager.value:
+        raise HTTPException(status_code=403, detail="Managers can't add other managers.")
+
+    if await db.users.find_one({"email": payload.email}):
+        raise HTTPException(status_code=400, detail="Email already registered.")
+
+    staff = User(
+        email=payload.email, name=payload.name, role=payload.role,
+        cafe_id=current_user["cafe_id"], is_email_verified=False,
+        created_by=current_user.get("user_id"),
+    )
+    doc = to_mongo(staff)
+    await db.users.insert_one(doc)
+    otp = await send_first_login_otp(db, doc)
+
+    resp = staff.model_dump(mode="json")
+    if otp:  # DEV convenience: no mailbox required locally.
+        resp["dev_otp"] = otp
+    return resp
+
+
+@router.post("/staff/{staff_id}/resend-invite")
+async def resend_invite(staff_id: str, current_user: dict = Depends(MANAGEMENT)):
+    """Re-send the first-login OTP if the original expired or got lost."""
+    staff = await _find_staff_or_404(staff_id, current_user["cafe_id"])
+    if staff.get("is_email_verified"):
+        raise HTTPException(status_code=400, detail="This staff member has already signed in.")
+
+    otp = await send_first_login_otp(db, staff)
+    resp = {"message": "Invite re-sent."}
+    if otp:
+        resp["dev_otp"] = otp
+    return resp
+
+
+@router.get("/staff", response_model=List[User])
+async def get_staff(current_user: dict = Depends(MANAGEMENT)):
+    """List staff for the manager's cafe (active and deactivated)."""
+    return await db.users.find(
+        {"cafe_id": current_user["cafe_id"], "role": {"$in": _ROSTER_ROLES}}, {"_id": 0, "password": 0},
+    ).to_list(1000)
+
+
+@router.patch("/staff/{staff_id}", response_model=User)
+async def update_staff(staff_id: str, payload: WaiterUpdate, current_user: dict = Depends(MANAGEMENT)):
+    """Edit a staff roster entry's name."""
+    staff = await _find_staff_or_404(staff_id, current_user["cafe_id"])
+    _guard_manager_boundary(current_user, staff)
 
     updates: dict = {}
     if payload.name is not None and payload.name.strip():
         updates["name"] = payload.name.strip()
-
-    if payload.username is not None and payload.username.strip():
-        uname = re.sub(r"[^a-z0-9]", "", payload.username.lower())
-        if not uname:
-            raise HTTPException(status_code=400, detail="Username must contain letters or digits.")
-        clash = await db.users.find_one({"username": uname, "id": {"$ne": waiter_id}})
-        if clash:
-            raise HTTPException(status_code=400, detail="That username is already taken.")
-        updates["username"] = uname
-        updates["email"] = f"{uname}@staff.local"
-
     if updates:
-        await db.users.update_one({"id": waiter_id}, {"$set": updates})
+        await db.users.update_one({"id": staff_id}, {"$set": updates})
 
-    return await db.users.find_one({"id": waiter_id}, {"_id": 0, "password": 0, "pin": 0, "password_enc": 0})
+    return await db.users.find_one({"id": staff_id}, {"_id": 0, "password": 0})
 
 
-@router.get("/waiters/{waiter_id}/stats")
-async def waiter_stats(waiter_id: str, current_user: dict = Depends(MANAGEMENT)):
+@router.get("/staff/{staff_id}/stats")
+async def staff_stats(staff_id: str, current_user: dict = Depends(MANAGEMENT)):
     """Per-staff analytics: orders taken, tables served, revenue, and recent bills."""
     cafe_id = current_user["cafe_id"]
-    staff = await db.users.find_one(
-        {"id": waiter_id, "cafe_id": cafe_id, "role": {"$in": _ROSTER_ROLES}},
-        {"_id": 0, "password": 0, "pin": 0, "password_enc": 0},
-    )
-    if not staff:
-        raise HTTPException(status_code=404, detail="Staff member not found.")
+    staff = await _find_staff_or_404(staff_id, cafe_id)
 
-    orders = await db.orders.find({"cafe_id": cafe_id, "waiter_id": waiter_id}, {"_id": 0}).to_list(10000)
+    orders = await db.orders.find({"cafe_id": cafe_id, "waiter_id": staff_id}, {"_id": 0}).to_list(10000)
     tables_served = {o["table_id"] for o in orders if o.get("table_id")}
     items_sold = sum(i.get("quantity", 0) for o in orders for i in o.get("items", []))
 
     bills = await db.bills.find(
-        {"cafe_id": cafe_id, "waiter_id": waiter_id, "soft_deleted": False}, {"_id": 0}
+        {"cafe_id": cafe_id, "waiter_id": staff_id, "soft_deleted": False}, {"_id": 0}
     ).sort("bill_number", -1).to_list(10000)
     revenue = sum(b.get("total", 0) for b in bills)
 
@@ -182,6 +188,7 @@ async def waiter_stats(waiter_id: str, current_user: dict = Depends(MANAGEMENT))
 
 
 # ---- Device pairing (device-code only; manager sets who's on the device) ----
+# Deferred to Slice 6 — still live and tested under its original /waiters path.
 
 @router.post("/waiters/devices/request")
 async def request_device_code(payload: DeviceCodeRequest):
@@ -353,37 +360,31 @@ async def revoke_device(activation_id: str, current_user: dict = Depends(MANAGEM
 
 # ---- Staff lifecycle ----
 
-async def _find_staff_or_404(waiter_id: str, cafe_id: str) -> dict:
-    staff = await db.users.find_one(
-        {"id": waiter_id, "cafe_id": cafe_id, "role": {"$in": _ROSTER_ROLES}}, {"_id": 0}
-    )
-    if not staff:
-        raise HTTPException(status_code=404, detail="Staff member not found.")
-    return staff
-
-
-@router.post("/waiters/{waiter_id}/deactivate")
-async def deactivate_waiter(waiter_id: str, current_user: dict = Depends(MANAGEMENT)):
+@router.post("/staff/{staff_id}/deactivate")
+async def deactivate_staff(staff_id: str, current_user: dict = Depends(MANAGEMENT)):
     """Soft-disable a staff member and unassign them from any devices (which stay
     paired, just ordering-only until someone else is assigned)."""
-    await _find_staff_or_404(waiter_id, current_user["cafe_id"])
-    await db.users.update_one({"id": waiter_id}, {"$set": {"is_active": False}})
-    await db.device_activations.update_many({"user_id": waiter_id}, {"$set": {"user_id": None}})
+    staff = await _find_staff_or_404(staff_id, current_user["cafe_id"])
+    _guard_manager_boundary(current_user, staff)
+    await db.users.update_one({"id": staff_id}, {"$set": {"is_active": False}})
+    await db.device_activations.update_many({"user_id": staff_id}, {"$set": {"user_id": None}})
     return {"message": "Staff member deactivated."}
 
 
-@router.post("/waiters/{waiter_id}/activate")
-async def reactivate_waiter(waiter_id: str, current_user: dict = Depends(MANAGEMENT)):
+@router.post("/staff/{staff_id}/activate")
+async def reactivate_staff(staff_id: str, current_user: dict = Depends(MANAGEMENT)):
     """Re-enable a previously deactivated staff member."""
-    await _find_staff_or_404(waiter_id, current_user["cafe_id"])
-    await db.users.update_one({"id": waiter_id}, {"$set": {"is_active": True}})
+    staff = await _find_staff_or_404(staff_id, current_user["cafe_id"])
+    _guard_manager_boundary(current_user, staff)
+    await db.users.update_one({"id": staff_id}, {"$set": {"is_active": True}})
     return {"message": "Staff member reactivated."}
 
 
-@router.delete("/waiters/{waiter_id}")
-async def delete_waiter(waiter_id: str, current_user: dict = Depends(MANAGEMENT)):
+@router.delete("/staff/{staff_id}")
+async def delete_staff(staff_id: str, current_user: dict = Depends(MANAGEMENT)):
     """Delete a staff member; any devices they were on stay paired but unassigned."""
-    await _find_staff_or_404(waiter_id, current_user["cafe_id"])
-    await db.users.delete_one({"id": waiter_id})
-    await db.device_activations.update_many({"user_id": waiter_id}, {"$set": {"user_id": None}})
+    staff = await _find_staff_or_404(staff_id, current_user["cafe_id"])
+    _guard_manager_boundary(current_user, staff)
+    await db.users.delete_one({"id": staff_id})
+    await db.device_activations.update_many({"user_id": staff_id}, {"$set": {"user_id": None}})
     return {"message": "Staff member deleted."}

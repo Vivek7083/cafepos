@@ -27,7 +27,7 @@ MANAGEMENT_CALLS = [
     ("post", "/api/bills", BILL),
     ("post", "/api/reservations", RESERVATION),
     ("get", "/api/reconciliation", None),
-    ("get", "/api/waiters", None),
+    ("get", "/api/staff", None),
 ]
 OWNER_ONLY_CALLS = [
     ("patch", "/api/cafe", {"name": "Renamed"}),
@@ -133,7 +133,7 @@ async def test_roster_lists_waiters_kitchen_and_managers_but_not_the_owner(api, 
     kitchen = await make_user("kitchen")
     manager = await make_user("manager")
 
-    listed = await api.get("/api/waiters", headers=owner["headers"])
+    listed = await api.get("/api/staff", headers=owner["headers"])
     assert listed.status_code == 200, listed.text
     assert {u["id"] for u in listed.json()} == {waiter["user_id"], kitchen["user_id"], manager["user_id"]}
 
@@ -145,7 +145,7 @@ async def test_roster_does_not_cross_cafes(api, owner, make_user):
         json={"email": "other@example.com", "password": "password123", "name": "B", "cafe_name": "Cafe B"},
     )
     other_headers = {"Authorization": f"Bearer {other.json()['token']}"}
-    assert (await api.get("/api/waiters", headers=other_headers)).json() == []
+    assert (await api.get("/api/staff", headers=other_headers)).json() == []
 
 
 # ---- /profile: open to every signed-in role ----

@@ -1,6 +1,6 @@
 import re
 from datetime import datetime
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
 
@@ -22,7 +22,6 @@ class User(DBModel):
     id: str = Field(default_factory=new_id)
     email: str
     name: str
-    username: Optional[str] = None  # staff log in with this; managers use email — retired in Slice 5
     phone: Optional[str] = None
     role: str = Role.owner.value  # platform_admin, owner, manager, waiter, kitchen
     cafe_id: Optional[str] = None  # None only for platform_admin
@@ -156,17 +155,18 @@ class AuthResponse(BaseModel):
     refresh_token: str
 
 
-class WaiterCreate(BaseModel):
-    """Manager adds a staff member to the roster (a name for attribution).
-    No login credentials — staff never sign in; devices do."""
+class StaffInvite(BaseModel):
+    """Owner/manager invites a new staff member — one endpoint for every role.
+    An owner may invite any of the three; a manager may not invite another
+    manager (enforced at the call site, not here)."""
     name: str = Field(min_length=1)
-    username: Optional[str] = None
+    email: EmailStr
+    role: Literal["waiter", "kitchen", "manager"]
 
 
 class WaiterUpdate(BaseModel):
     """Admin edit of a staff roster entry. Any field omitted is left unchanged."""
     name: Optional[str] = None
-    username: Optional[str] = None
 
 
 class DeviceActivate(BaseModel):

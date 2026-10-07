@@ -35,11 +35,10 @@ from app.models.user import (
     UserCreate,
     UserLogin,
 )
+from app.services.auth_otp import FIRST_LOGIN, send_first_login_otp
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 settings = get_settings()
-
-_FIRST_LOGIN = "first_login"
 
 
 def _issue(user: User) -> AuthResponse:
@@ -197,22 +196,8 @@ async def login_start(payload: LoginStart):
     if not user or not user.get("is_email_verified"):
         resp = {"next": "verify"}
         if user:
-            otp = generate_otp()
-            await db.action_otps.replace_one(
-                {"user_id": user["id"], "purpose": _FIRST_LOGIN},
-                {
-                    "user_id": user["id"],
-                    "cafe_id": user.get("cafe_id"),
-                    "purpose": _FIRST_LOGIN,
-                    "otp_hash": get_password_hash(otp),
-                    "attempts": 0,
-                    "expires_at": utcnow() + timedelta(minutes=settings.otp_expiry_minutes),
-                },
-                upsert=True,
-            )
-            subject, body = otp_email(user.get("name", "there"), otp)
-            await send_email(user["email"], subject, body)
-            if not settings.email_configured:  # DEV convenience.
+            otp = await send_first_login_otp(db, user)
+            if otp:  # DEV convenience: no mailbox required locally.
                 resp["dev_otp"] = otp
         return resp
     return {"next": "password"}
@@ -227,7 +212,7 @@ async def first_login(payload: FirstLogin):
     if not user:
         raise HTTPException(status_code=400, detail="Invalid or expired code.")
 
-    challenge = await db.action_otps.find_one({"user_id": user["id"], "purpose": _FIRST_LOGIN})
+    challenge = await db.action_otps.find_one({"user_id": user["id"], "purpose": FIRST_LOGIN})
     if not challenge:
         raise HTTPException(status_code=400, detail="Invalid or expired code.")
     if is_expired(challenge["expires_at"]):

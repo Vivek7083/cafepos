@@ -1,7 +1,7 @@
 """Moving a sitting between tables, and what a floor device may change."""
 import pytest
 
-from .test_waiters import _pair_device
+from .test_staff import _pair_device
 
 
 @pytest.fixture
