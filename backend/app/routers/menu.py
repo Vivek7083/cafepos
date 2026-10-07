@@ -1,17 +1,17 @@
 from datetime import timedelta
-from typing import List
+from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from app.core.config import get_settings
-from app.core.deps import MANAGEMENT, get_current_user
+from app.core.deps import MANAGEMENT, OWNER_ONLY, get_current_user
 from app.core.email import action_otp_email, send_email
 from app.core.security import generate_otp, get_password_hash, is_expired, verify_password
 from app.db.mongo import db
 from app.db.serialization import to_mongo
-from app.models.common import utcnow
-from app.models.menu import Category, CategoryCreate, MenuItem, MenuItemCreate
+from app.models.common import Role, utcnow
+from app.models.menu import Category, CategoryCreate, MenuItem, MenuItemCreate, PriceChangeRequest
 
 router = APIRouter(prefix="/menu", tags=["menu"])
 settings = get_settings()
@@ -78,16 +78,35 @@ async def create_menu_item(payload: MenuItemCreate, current_user: dict = Depends
     return item
 
 
-@router.put("/items/{item_id}", response_model=MenuItem)
+@router.put("/items/{item_id}")
 async def update_menu_item(item_id: str, payload: MenuItemCreate, current_user: dict = Depends(MANAGEMENT)):
     existing = await db.menu_items.find_one({"id": item_id}, {"_id": 0})
     if not existing:
         raise HTTPException(status_code=404, detail="Menu item not found.")
     if existing["cafe_id"] != current_user["cafe_id"]:
         raise HTTPException(status_code=403, detail="You do not have access to this menu item.")
+
     update = {**payload.model_dump(), "cafe_id": current_user["cafe_id"]}
+
+    # A manager's price change is held for owner approval — the live price
+    # isn't touched until it resolves. Every other field still applies at once.
+    pending_price = current_user["role"] == Role.manager.value and payload.price != existing["price"]
+    if pending_price:
+        update.pop("price")
+        request = PriceChangeRequest(
+            cafe_id=current_user["cafe_id"],
+            menu_item_id=item_id,
+            current_price=existing["price"],
+            proposed_price=payload.price,
+            requested_by=current_user.get("user_id"),
+        )
+        await db.price_change_requests.insert_one(to_mongo(request))
+
     await db.menu_items.update_one({"id": item_id}, {"$set": update})
-    return await db.menu_items.find_one({"id": item_id}, {"_id": 0})
+    item = await db.menu_items.find_one({"id": item_id}, {"_id": 0})
+    if pending_price:
+        item["price_change_status"] = "pending_approval"
+    return item
 
 
 @router.delete("/items/{item_id}")
@@ -163,3 +182,55 @@ async def confirm_menu_purge(payload: OtpConfirm, current_user: dict = Depends(M
         "deleted_items": items.deleted_count,
         "deleted_categories": cats.deleted_count,
     }
+
+
+# ---- Price-change approval queue (manager proposes, owner resolves) ----
+
+async def _find_price_request_or_404(request_id: str, cafe_id: str) -> dict:
+    request = await db.price_change_requests.find_one(
+        {"id": request_id, "cafe_id": cafe_id}, {"_id": 0}
+    )
+    if not request:
+        raise HTTPException(status_code=404, detail="Price change request not found.")
+    return request
+
+
+@router.get("/price-requests", response_model=List[PriceChangeRequest])
+async def list_price_requests(status: Optional[str] = None, current_user: dict = Depends(OWNER_ONLY)):
+    query: dict = {"cafe_id": current_user["cafe_id"]}
+    if status:
+        query["status"] = status
+    return await db.price_change_requests.find(query, {"_id": 0}).sort("requested_at", -1).to_list(1000)
+
+
+@router.post("/price-requests/{request_id}/approve", response_model=PriceChangeRequest)
+async def approve_price_request(request_id: str, current_user: dict = Depends(OWNER_ONLY)):
+    cafe_id = current_user["cafe_id"]
+    request = await _find_price_request_or_404(request_id, cafe_id)
+    if request["status"] != "pending":
+        raise HTTPException(status_code=400, detail="This request has already been resolved.")
+
+    await db.menu_items.update_one(
+        {"id": request["menu_item_id"], "cafe_id": cafe_id},
+        {"$set": {"price": request["proposed_price"]}},
+    )
+    await db.price_change_requests.update_one(
+        {"id": request_id},
+        {"$set": {"status": "approved", "resolved_by": current_user.get("user_id"), "resolved_at": utcnow()}},
+    )
+    return await db.price_change_requests.find_one({"id": request_id}, {"_id": 0})
+
+
+@router.post("/price-requests/{request_id}/reject", response_model=PriceChangeRequest)
+async def reject_price_request(request_id: str, current_user: dict = Depends(OWNER_ONLY)):
+    """Stamps only — the item's price is untouched."""
+    cafe_id = current_user["cafe_id"]
+    request = await _find_price_request_or_404(request_id, cafe_id)
+    if request["status"] != "pending":
+        raise HTTPException(status_code=400, detail="This request has already been resolved.")
+
+    await db.price_change_requests.update_one(
+        {"id": request_id},
+        {"$set": {"status": "rejected", "resolved_by": current_user.get("user_id"), "resolved_at": utcnow()}},
+    )
+    return await db.price_change_requests.find_one({"id": request_id}, {"_id": 0})

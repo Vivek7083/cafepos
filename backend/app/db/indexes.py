@@ -23,6 +23,7 @@ _INDEXES = [
     ("orders", [("cafe_id", ASCENDING), ("status", ASCENDING)], {}),
     ("categories", [("cafe_id", ASCENDING)], {}),
     ("menu_items", [("cafe_id", ASCENDING), ("category_id", ASCENDING)], {}),
+    ("price_change_requests", [("cafe_id", ASCENDING), ("status", ASCENDING)], {}),
     ("floors", [("cafe_id", ASCENDING)], {}),
     ("tables", [("cafe_id", ASCENDING)], {}),
     ("reservations", [("cafe_id", ASCENDING), ("reservation_date", ASCENDING)], {}),
