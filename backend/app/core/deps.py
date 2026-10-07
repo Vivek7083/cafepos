@@ -5,6 +5,7 @@ from fastapi import Depends, Header, HTTPException
 
 from app.core.security import decode_token
 from app.db.mongo import db
+from app.models.common import Role
 
 
 async def get_current_user(authorization: str = Header(None)) -> dict:
@@ -74,3 +75,12 @@ def require_role(allowed_roles: Sequence[str]):
         return current_user
 
     return role_checker
+
+
+# The two permission tiers every cafe-scoped router builds on. Defined once so
+# anything that must apply to "all management endpoints" (e.g. the cafe-approval
+# gate) has a single place to hook in.
+#   OWNER_ONLY  — business settings and anything a manager must not touch.
+#   MANAGEMENT  — day-to-day running of the cafe: owner and manager.
+OWNER_ONLY = require_role([Role.owner.value])
+MANAGEMENT = require_role([Role.owner.value, Role.manager.value])

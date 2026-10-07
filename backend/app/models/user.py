@@ -24,8 +24,8 @@ class User(DBModel):
     name: str
     username: Optional[str] = None  # staff log in with this; managers use email
     phone: Optional[str] = None
-    role: str = Role.owner.value  # superadmin, owner, staff
-    cafe_id: str
+    role: str = Role.owner.value  # platform_admin, owner, manager, waiter, kitchen
+    cafe_id: Optional[str] = None  # None only for platform_admin
     pin: Optional[str] = None  # bcrypt-hashed 4-digit PIN for staff
     is_active: bool = True
     device_token: Optional[str] = None

@@ -25,9 +25,11 @@ class DBModel(BaseModel):
 
 
 class Role(str, Enum):
-    superadmin = "superadmin"
+    platform_admin = "platform_admin"  # operates the platform; belongs to no cafe
     owner = "owner"
-    staff = "staff"
+    manager = "manager"
+    waiter = "waiter"
+    kitchen = "kitchen"
 
 
 class TableStatus(str, Enum):

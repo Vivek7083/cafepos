@@ -17,8 +17,8 @@ async def test_printer_requires_auth(api, owner):
 
 
 async def test_device_cannot_manage_menu(api, owner):
-    """A paired ordering device has the staff role: it can read the menu but not
-    manage it (owner/superadmin only)."""
+    """A paired ordering device holds no management role: it can read the menu
+    but not manage it (owner/manager only)."""
     device_id = "device-abc"
     code = (await api.post("/api/waiters/devices/request", json={"device_id": device_id})).json()["code"]
     act = await api.post("/api/waiters/devices/activate", json={"code": code}, headers=owner["headers"])

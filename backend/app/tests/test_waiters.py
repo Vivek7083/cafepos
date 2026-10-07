@@ -33,7 +33,7 @@ async def test_create_staff_needs_no_password(api, owner):
     # Name only — no password/confirm required anymore.
     resp = await api.post("/api/waiters", json={"name": "Solo Name"}, headers=owner["headers"])
     assert resp.status_code == 200, resp.text
-    assert resp.json()["role"] == "staff"
+    assert resp.json()["role"] == "waiter"
 
 
 async def test_update_waiter(api, owner):
